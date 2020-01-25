@@ -11,6 +11,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 
+enum ConfirmAction { CANCEL, ACCEPT }
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(PhotosApp());
@@ -19,11 +21,11 @@ void main() {
 const kAndroidUserAgent =
     'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.94 Mobile Safari/537.36';
 
-// String selectedUrl = 'http://cryptpad.local:5000/';
-String selectedUrl = 'https://cryptpad.fr/';
+String selectedUrl = 'http://cryptpad.local:5000/';
+// String selectedUrl = 'https://cryptpad.fr/';
 
 // ignore: prefer_collection_literals
-final Set<JavascriptChannel> jsChannels = [
+final Set<JavascriptChannel> jsChannels1 = [
   JavascriptChannel(
       name: 'Print1',
       onMessageReceived: (JavascriptMessage message) {
@@ -45,10 +47,11 @@ class PhotosApp extends StatelessWidget {
       ),
       home: MyHomePage(title: 'CryptPad Photos'),
       routes: {
+        '/remote': (_) {},
         '/widget': (_) {
           return WebviewScaffold(
             url: selectedUrl,
-            javascriptChannels: jsChannels,
+            javascriptChannels: jsChannels1,
             mediaPlaybackRequiresUserGesture: false,
             appBar: AppBar(
               title: const Text('CryptPad'),
@@ -103,10 +106,12 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  String _output = "";
-
+  String currentView = "local";
   List<AssetPathEntity> imagesList = [];
   List<AssetEntity> assetList = [];
+  Map<String, dynamic> remoteImagesListMap = new Map<String, dynamic>();
+  List<String> remoteImagesList = new List<String>();
+
   String currentFilename = "";
   int currentIndex = 0;
 
@@ -145,6 +150,13 @@ class _MyHomePageState extends State<MyHomePage> {
 
   Base64Codec base64 = const Base64Codec();
 
+  bool uploadStarted = false;
+  bool reloadWebView = false;
+  Map<String, dynamic> driveData;
+  Map<String, dynamic> uploadStatus;
+  double uploadProgress = 0;
+  Set<JavascriptChannel> jsChannels;
+
   @override
   void initState() {
     requestPermission();
@@ -152,36 +164,122 @@ class _MyHomePageState extends State<MyHomePage> {
 
     flutterWebViewPlugin.onStateChanged.listen((viewState) async {
       if (viewState.type == WebViewState.finishLoad) {
-        flutterWebViewPluginLoaded = true;
+        Future.delayed(new Duration(seconds: 5), () {
+          flutterWebViewPlugin.evalJavascript(
+              """Console.postMessage("Test cryptpad ready start");
+                                               Cryptpad.ready(function() { 
+                                                      Console.postMessage("CryptPad Ready"); 
+                                                      CryptPadReady.postMessage(""); 
+                                               }); 
+                                               Console.postMessage("Test cryptpad ready end");
+                                               """);
+        });
         print("WebView loaded");
       }
     });
-
-    // ignore: prefer_collection_literals
-    Set<JavascriptChannel> jsChannels = [
+    jsChannels = [
       JavascriptChannel(
-          name: 'Print',
+          name: 'UploadComplete',
           onMessageReceived: (JavascriptMessage message) {
             print("JAVASCRIPT MESSAGE: " + message.message);
             if (message.message.startsWith("/file/")) {
               // Persist the remote path on the CryptPad server
               print("Persisting output for " + currentFilename);
               saveString(selectedUrl, currentFilename, message.message);
+              uploadStarted = false;
+              uploadProgress = 0;
               _showDialog("Image replicated", message.message);
               currentIndex++;
+              requestPermission();
             }
           }),
+      JavascriptChannel(
+          name: 'CryptPadReady',
+          onMessageReceived: (JavascriptMessage message) {
+            flutterWebViewPluginLoaded = true;
+            // load the drive data
+            _getUserObject();
+            print("JAVASCRIPT CryptPadReady");
+          }),
+      JavascriptChannel(
+          name: 'Console',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT Console: " + message.message);
+          }),
+      JavascriptChannel(
+          name: 'Alert',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT Alert: " + message.message);
+            _showDialog("Alert", message.message);
+          }),
+      JavascriptChannel(
+          name: 'Drive',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT Drive data: " + message.message);
+            driveData = jsonDecode(message.message);
+          }),
+      JavascriptChannel(
+          name: 'UploadProgress',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT Upload progress: " + message.message);
+            uploadProgress = double.parse(message.message);
+          }),
+      JavascriptChannel(
+          name: 'UploadStatus',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT Upload status: " + message.message);
+            uploadStatus = jsonDecode(message.message);
+          }),
+      JavascriptChannel(
+          name: 'UploadError',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT Upload error: " + message.message);
+            if (message.message == "RPC_NOT_READY") {
+              _showDialog("Upload Error",
+                  "You are not connected to CryptPad. Use the cryptpad view to login.");
+              reloadWebView = true;
+            } else {
+              _showDialog("Upload Error", message.message);
+            }
+            uploadStarted = false;
+          }),
+      JavascriptChannel(
+          name: 'GetFileMetadata',
+          onMessageReceived: (JavascriptMessage message) {
+            print("JAVASCRIPT GetMetadata: " + message.message);
+            var data = jsonDecode(message.message);
+            print("HREF: " + data.href);
+          }),
+
+
     ].toSet();
 
-    print("WebView launch");
-    flutterWebViewPlugin.launch(selectedUrl + "drive/",
-        javascriptChannels: jsChannels, hidden: true);
+    _loadWebView();
 
     _onHttpError =
         flutterWebViewPlugin.onHttpError.listen((WebViewHttpError error) {
       print(error.toString());
       // _showDialog("Error", error.toString());
     });
+  }
+
+  Future<Null> _reloadWebView() async {
+    Future<Null> future = await flutterWebViewPlugin.close();
+    _loadWebView();
+    return future;
+  }
+
+  void _loadWebView() {
+    print("WebView launch");
+    flutterWebViewPlugin.launch(selectedUrl + "drive/",
+        javascriptChannels: jsChannels,
+        hidden: true,
+        rect: new Rect.fromLTWH(
+          0.0,
+          0.0,
+          200.0,
+          500.0,
+        ));
   }
 
   void requestPermission() async {
@@ -225,23 +323,182 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  Future<Image> _loadImage(index) async {
-    AssetEntity entity = assetList[index % assetList.length];
-    return Image.file(await entity.file);
+  Future<ConfirmAction> _asyncConfirmDialog(
+      String title, String message) async {
+    return showDialog<ConfirmAction>(
+      context: context,
+      barrierDismissible: false, // user must tap button for close dialog!
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: <Widget>[
+            FlatButton(
+              child: const Text('CANCEL'),
+              onPressed: () {
+                Navigator.of(context).pop(ConfirmAction.CANCEL);
+              },
+            ),
+            FlatButton(
+              child: const Text('ACCEPT'),
+              onPressed: () {
+                Navigator.of(context).pop(ConfirmAction.ACCEPT);
+              },
+            )
+          ],
+        );
+      },
+    );
   }
 
-  Future getImage(index) async {
+  Future<List> _loadImageData(index) async {
+    AssetEntity entity = assetList[index % assetList.length];
+    File file = await entity.file;
+    String filename = p.basename(file.path);
+    String currentRemotePage =
+        (filename == null) ? "" : await getString(selectedUrl, filename);
+    bool isReplicated = (currentRemotePage != null);
+    print("Image: " +
+        filename +
+        " remote: " +
+        currentRemotePage.toString() +
+        " isReplicated: " +
+        isReplicated.toString());
+    return [Image.file(await entity.file), isReplicated];
+  }
+
+  Future<List> getImage(index) async {
     AssetEntity entity = assetList[index];
     File file = await entity.file;
     String filename = p.basename(file.path);
+    // Check if we have not already pushed this image to cryptpad
     String currentRemotePage = await getString(selectedUrl, filename);
-    String b64 = base64.encode(await entity.thumbDataWithSize(100, 100, format: ThumbFormat.png));
+    if (currentRemotePage != null && index < assetList.length) {
+      currentIndex++;
+      return getImage(index + 1);
+    }
+
+    // Check if we find this image in the drive data
+    var remoteImageData = await _getRemoteImageData(filename, false);
+    if (remoteImageData != null) {
+      print("Image already in drive");
+      currentIndex++;
+      return getImage(index + 1);
+    }
+
+    // Retrieve base64 thumbnail
+    String b64 = base64.encode(
+        await entity.thumbDataWithSize(100, 100, format: ThumbFormat.png));
     return [await entity.fullData, filename, currentRemotePage, b64];
   }
 
   // 1
   String _generateKey(String server, String key) {
     return '$server/$key';
+  }
+
+  /*
+   CryptPad functions: get drive data
+   */
+  Future<Map<String, dynamic>> _getUserObject() async {
+    driveData = null;
+    String script = """Console.postMessage("getUserObject start");
+                     Cryptpad.getUserObject("", function(data) { 
+                      Console.postMessage("getUserObject callback");
+                      Drive.postMessage(JSON.stringify(data));
+                     });
+                    Console.postMessage("getUserObject end"); 
+                     """;
+    _readyForUpload(false).then((bool ready) {
+      if (ready) {
+        flutterWebViewPlugin.evalJavascript(script);
+      }
+    });
+
+    for (var i = 0; i < 5; i++) {
+      if (driveData != null)
+        return driveData;
+      else
+        await Future.delayed(new Duration(seconds: 1));
+    }
+    return driveData;
+  }
+
+  /*
+   CryptPad functuions: get remote data for one file
+   */
+  Future<Map<String, dynamic>> _getRemoteImageData(
+      String filename, bool forceLoad) async {
+    if (forceLoad || (driveData == null)) {
+      driveData = await _getUserObject();
+    }
+
+    Map filesData = driveData["drive"]["filesData"];
+    for (var key in filesData.keys) {
+      var value = filesData[key];
+      if (value["title"] == filename) {
+        print("Found remote value: " + value.toString());
+        // store this locally
+        var href = value["href"];
+        saveString(selectedUrl, filename, href);
+        return value;
+      }
+    }
+    print("Did not find remote value");
+    return null;
+  }
+
+  Future<String> _loadDriveImageData(index) async {
+    var href = remoteImagesList[index];
+    var file = remoteImagesListMap[href];
+
+    var script = """
+     var href = '""" + href + """';
+     require(['/file/file-crypto.js'], function (FileCrypto) {
+       var data =CryptPad_Hash.parsePadUrl(href)
+       var secret = CryptPad_Hash.getSecrets(data.type, data.hash, data.password)
+       var src = "" + CryptPad_Hash.getBlobPathFromHex(secret.channel);
+       var key = secret.keys && secret.keys.cryptKey;
+       FileCrypto.fetchDecryptedMetadata(src, key, function (e, metadata) {
+          var json = { href : href, metadata : metadata };
+          GetFileMetadata.postMessage(JSON.stringify(json));          
+       });
+     });
+    """;
+    flutterWebViewPlugin.evalJavascript(script);
+
+
+    return "";
+  }
+
+  /*
+   CryptPad functions get number of images
+   */
+  int _getDriveImageNumber() {
+    try {
+      if (driveData == null) {
+        print("Drive not loaded");
+        return 0;
+      }
+      int nb = 0;
+      Map filesData = driveData["drive"]["filesData"];
+      for (var key in filesData.keys) {
+        var file = filesData[key];
+        var fileType = file["fileType"];
+        if (fileType!=null && fileType.startsWith("image/")) {
+          var href = file["href"];
+          remoteImagesList.add(href);
+          remoteImagesListMap[href] = file;
+          nb++;
+        }
+      }
+      print("Found " + nb.toString() + " images");
+      return nb;
+    } catch (e) {
+      print("Exception counting images");
+      print(e);
+      return 0;
+    }
   }
 
   @override
@@ -260,8 +517,213 @@ class _MyHomePageState extends State<MyHomePage> {
     return prefs.getString(_generateKey(server, filename));
   }
 
+  String _getUploadScript(imageData, filename, b64) {
+    StringBuffer str = new StringBuffer();
+    var it = imageData.iterator;
+    while (it.moveNext()) {
+      var char = it.current;
+      str.write("'");
+      str.write(it.current);
+      str.write("',");
+    }
+    String script = """
+          var filename = '""" +
+        filename +
+        """';
+        Console.postMessage("script start"); 
+        var u8 = new Uint8Array( [""" +
+        str.toString() +
+        """]);
+        var metadata = {name: filename, type: "image/jpeg", thumbnail: "data:image/jpeg;base64,""" +
+        b64 +
+        """", owners: []}
+        var file = { blob: u8, metadata : metadata, forceSave : true, owned : true, path: ["root"], uid: CryptPad_Util.uid()}
+        
+        var result = "";
+        require(['/common/outer/upload.js'], function (Files) {
+          try {
+           Console.postMessage("begin require");  
+           var uploadProgress = function(res) {
+             Console.postMessage("In progress");  
+             Console.postMessage(res);
+             UploadProgress.postMessage(res);
+           }
+           var uploadComplete = function(res) {
+             Console.postMessage("In complete");  
+             Console.postMessage(res);
+             UploadComplete.postMessage(res);
+          }
+           var uploadError = function(res) {
+             Console.postMessage("In error");  
+             Console.postMessage(res);
+             UploadError.postMessage(res);
+            }
+           var uploadPending = function(res) {
+             Console.postMessage("In complete");  
+             Console.postMessage(res);
+           }
+           
+           Files.upload(file, false, Cryptpad, uploadProgress, uploadComplete, uploadError, uploadPending);
+           Console.postMessage("End require");  
+          } catch (e) {
+          Console.postMessage("Exception"); 
+          Console.postMessage(e); 
+         }
+        }); 
+        Console.postMessage("run");
+        """;
+    return script;
+  }
+
+  void _uploadNextImage() {
+    uploadStarted = true;
+
+    if (assetList.length > currentIndex) {
+      // Make sure the drive is loaded
+      driveData = null;
+      var mydata = getImage(currentIndex);
+      mydata.then((data) {
+        var imageData = data[0];
+        var filename = data[1];
+        var remotePath = data[2];
+        var b64 = data[3];
+        print("File path " + filename);
+
+        if (remotePath == null || remotePath == "") {
+          currentFilename = filename;
+          print(imageData.length);
+
+          String script = _getUploadScript(imageData, filename, b64);
+          print("Running script");
+          print(script);
+          final future = flutterWebViewPlugin.evalJavascript(script);
+          print("script run. Waiting feedback");
+          future.whenComplete(() {
+            print("script complete");
+          });
+          future.then((String result) {
+            print("script launched");
+            print(result);
+          });
+          future.catchError((Object result) {
+            uploadStarted = false;
+            print("script error");
+            _showDialog("Error", result);
+          });
+        } else {
+          print("File " + filename + " already replicated to " + remotePath);
+          _showDialog("Image already replicated", remotePath);
+          uploadStarted = false;
+          currentIndex++;
+        }
+      });
+    } else {
+      uploadStarted = false;
+      print("No more images available");
+    }
+  }
+
+  Future<bool> _readyForUpload(bool withStarted) async {
+    // Check if flutter webview is loaded
+    if (flutterWebViewPluginLoaded == false) {
+      print("WebView not loaded");
+      _showDialog("Error", "WebView is not loaded.");
+      return false;
+    }
+
+    // Check if we need to reload the web view
+    if (reloadWebView) {
+      await _reloadWebView();
+    }
+
+    // Check if we need to ask to force upload
+    if (withStarted && uploadStarted) {
+      ConfirmAction action = await _asyncConfirmDialog(
+          "Upload already in progress",
+          "Would you like to cancel it and launch a new upload ?");
+      if (action == ConfirmAction.ACCEPT) {
+        print("Forcing upload");
+        return true;
+      } else {
+        return false;
+      }
+    }
+
+    print("Ready for upload");
+    return true;
+  }
+
   @override
   Widget build(BuildContext context) {
+    Widget body;
+
+    if (currentView == "local")
+      body = new Stack(children: <Widget>[
+        LinearProgressIndicator(
+          value: uploadProgress / 100,
+          backgroundColor: Color(0),
+        ),
+        StaggeredGridView.countBuilder(
+          padding: const EdgeInsets.all(8.0),
+          crossAxisCount: 3,
+          itemCount: assetList.length,
+          itemBuilder: (context, index) => FutureBuilder(
+            future: _loadImageData(index),
+            builder: (BuildContext context, AsyncSnapshot snapshot) {
+              return new Stack(
+                  alignment: Alignment.bottomRight,
+                  children: <Widget>[
+                    new Container(
+                      decoration: BoxDecoration(
+                          image: DecorationImage(
+                            image: snapshot.data[0].image,
+                            fit: BoxFit.cover,
+                          ),
+                          borderRadius: BorderRadius.circular(10.0)),
+                    ),
+                    new Container(
+                        height: (snapshot.data[1] == true) ? 25 : 0,
+                        width: (snapshot.data[1] == true) ? 25 : 0,
+                        margin: EdgeInsets.only(bottom: 5, right: 5),
+                        decoration: BoxDecoration(
+                          image: DecorationImage(
+                            image: new AssetImage(
+                                'assets/cryptpad-logo-white-50.png'),
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        alignment: Alignment.bottomRight)
+                  ]);
+            },
+          ),
+          staggeredTileBuilder: (index) => _staggeredTiles[index % _staggeredTiles.length],
+          mainAxisSpacing: 8.0,
+          crossAxisSpacing: 8.0,
+        )
+      ]);
+    else
+      body = new StaggeredGridView.countBuilder(
+        padding: const EdgeInsets.all(8.0),
+        crossAxisCount: 3,
+        itemCount: _getDriveImageNumber(),
+        itemBuilder: (context, index) => FutureBuilder(
+          future: _loadDriveImageData(index),
+          builder: (BuildContext context, AsyncSnapshot snapshot) {
+            return new Container(
+              decoration: BoxDecoration(
+                  image: DecorationImage(
+                    image: new AssetImage('assets/cryptpad-logo-50.png'),
+                    fit: BoxFit.cover,
+                  ),
+                  borderRadius: BorderRadius.circular(10.0)),
+            );
+          },
+        ),
+        staggeredTileBuilder: (index) => _staggeredTiles[index % _staggeredTiles.length],
+        mainAxisSpacing: 8.0,
+        crossAxisSpacing: 8.0,
+      );
+
     return Scaffold(
         backgroundColor: Colors.white,
         appBar: AppBar(
@@ -285,279 +747,36 @@ class _MyHomePageState extends State<MyHomePage> {
                   textColor: Colors.blue,
                   child: Text("Refresh"),
                   onPressed: () {
+                    flutterWebViewPluginLoaded = false;
+                    _reloadWebView();
                     requestPermission();
                   }),
-              /*
-              FlatButton(
-                  textColor: Colors.blue,
-                  child: Text("SyncText"),
-                  onPressed: () {
-                    if (flutterWebViewPluginLoaded == false) {
-                      print("WebView not loaded");
-                      return;
-                    }
-
-                    print("Running script");
-                    String script = """
-                    Print.postMessage("script start");
-                    var text = "Hello\\n";
-                    var result = "";
-                    require(['/common/outer/upload.js'], function (Files) {
-                    try {
-                      Print.postMessage("begin require");
-                         Print.postMessage("begin require");
-                       var cb1 = function(res) {
-                         Print.postMessage("In feedback1");
-                         Print.postMessage(res);
-                       }
-                       var cb2 = function(res) {
-                         Print.postMessage("In feedback2");
-                         Print.postMessage(res);
-                       }
-                       var cb3 = function(res) {
-                         Print.postMessage("In feedback3");
-                         Print.postMessage(res);
-                       }
-                       var cb4 = function(res) {
-                         Print.postMessage("In feedback4");
-                         Print.postMessage(res);
-                       }
-                       var u8 = new TextEncoder().encode(text);
-                       var metadata = {name: "filename6.txt", type: "text/plain", owners: ["a6qidzms8mmC3QfMEK2Q+VNDDzn2hxSnRfNRj90RPaA="]}
-                       var file = { blob: u8, metadata : metadata, forceSave : true, owned : true, path: [], uid: CryptPad_Util.uid()}
-                       Files.upload(file, false, Cryptpad, cb1, cb2, cb3, cb4);
-                       Print.postMessage("End require");
-                    } catch (e) {
-                    Print.postMessage("Exception");
-                    Print.postMessage(e);
-                    }
-                    });
-                    Print.postMessage("run");
-                    """;
-
-                    final future = flutterWebViewPlugin.evalJavascript(script);
-                    print("script run. Waiting feedback");
-
-                    var duration = new Duration(seconds: 10);
-                    final future2 = future.timeout(duration);
-                    future2.then((String result) {
-                      print("Timeout");
-                    });
-                    future.whenComplete(() {
-                      print("script complete");
-                      // _showDialog("Message", "complete");
-                    });
-                    future.then((String result) {
-                      print("After eval");
-                      print(result);
-                      // _showDialog("Message", result);
-                    });
-                    future.catchError((Object result) {
-                      print("script error");
-                      _showDialog("Error", result);
-                    });
-                  }),
-              FlatButton(
-                  textColor: Colors.blue,
-                  child: Text("SyncTestImage"),
-                  onPressed: () {
-                    if (flutterWebViewPluginLoaded == false) {
-                      print("WebView not loaded");
-                      return;
-                    }
-
-                    if (assetList.length > currentIndex) {
-                      print("IMAGE get");
-                      var mydata = getImage(currentIndex);
-                      mydata.then((result) {
-                        print("Length: ");
-                        print(result.length);
-                        print("Running script");
-                        String script = """
-                    Print.postMessage("script start");
-                    var u8 = new Uint8Array( ['137','80','78','71','13','10','26','10','0','0','0','13','73','72','68','82','0','0','0','1','0','0','0','1','1','3','0','0','0','37','219','86','202','0','0','0','3','80','76','84','69','0','0','0','167','122','61','218','0','0','0','1','116','82','78','83','0','64','230','216','102','0','0','0','10','73','68','65','84','8','215','99','96','0','0','0','2','0','1','226','33','188','51','0','0','0','0','73','69','78','68','174','66','96','130']);
-                    var metadata = {name: "pixel1.png", type: "image/png", owners: ["a6qidzms8mmC3QfMEK2Q+VNDDzn2hxSnRfNRj90RPaA="]}
-                    var file = { blob: u8, metadata : metadata, forceSave : true, owned : true, path: [], uid: CryptPad_Util.uid()}
-
-                    var result = "";
-                    require(['/common/outer/upload.js'], function (Files) {
-                      try {
-                       Print.postMessage("begin require");
-                       var cb1 = function(res) {
-                         Print.postMessage("In feedback1");
-                         Print.postMessage(res);
-                       }
-                       var cb2 = function(res) {
-                         Print.postMessage("In feedback2");
-                         Print.postMessage(res);
-                       }
-                       var cb3 = function(res) {
-                         Print.postMessage("In feedback3");
-                         Print.postMessage(res);
-                       }
-                       var cb4 = function(res) {
-                         Print.postMessage("In feedback4");
-                         Print.postMessage(res);
-                       }
-
-                       Files.upload(file, false, Cryptpad, cb1, cb2, cb3, cb4);
-                       Print.postMessage("End require");
-                      } catch (e) {
-                      Print.postMessage("Exception");
-                      Print.postMessage(e);
-                     }
-                    });
-                    Print.postMessage("run");
-                    """;
-
-                        final future =
-                            flutterWebViewPlugin.evalJavascript(script);
-                        print("script run. Waiting feedback");
-
-                        future.whenComplete(() {
-                          print("script complete");
-                          // _showDialog("Message", "complete");
-                        });
-                        future.then((String result) {
-                          print("After eval");
-                          print(result);
-                          // _showDialog("Message", result);
-                        });
-                        future.catchError((Object result) {
-                          print("script error");
-                          _showDialog("Error", result);
-                        });
-                      });
-                    }
-                  }),
-               */
               FlatButton(
                   textColor: Colors.blue,
                   child: Text("Sync"),
                   onPressed: () {
-                    if (flutterWebViewPluginLoaded == false) {
-                      print("WebView not loaded");
-                      return;
-                    }
-
-                    if (assetList.length > currentIndex) {
-                      print("IMAGE get");
-                      var mydata = getImage(currentIndex);
-                      mydata.then((data) {
-                        var result = data[0];
-                        var filename = data[1];
-                        var remotePath = data[2];
-                        var b64 = data[3];
-                        print("File path " + filename);
-
-                        if (remotePath == null || remotePath == "") {
-                          currentFilename = filename;
-                          print(result.length);
-                          StringBuffer str = new StringBuffer();
-                          var it = result.iterator;
-                          while (it.moveNext()) {
-                            var char = it.current;
-                            str.write("'");
-                            str.write(it.current);
-                            str.write("',");
-                          }
-                          print("Running script");
-
-
-                          String script = """
-                    var filename = '""" +
-                              filename +
-                              """';
-                    Print.postMessage("script start"); 
-                    var u8 = new Uint8Array( [""" +
-                              str.toString() +
-                              """]);
-                    var metadata = {name: filename, type: "image/jpeg", thumbnail: "data:image/jpeg;base64,""" + b64 + """", owners: []}
-                    var file = { blob: u8, metadata : metadata, forceSave : true, owned : true, path: ["root"], uid: CryptPad_Util.uid()}
-                    
-                    var result = "";
-                    require(['/common/outer/upload.js'], function (Files) {
-                      try {
-                       Print.postMessage("begin require");  
-                       var cb1 = function(res) {
-                         Print.postMessage("In feedback1");  
-                         Print.postMessage(res);
-                       }
-                       var cb2 = function(res) {
-                         Print.postMessage("In feedback2");  
-                         Print.postMessage(res);
-                       }
-                       var cb3 = function(res) {
-                         Print.postMessage("In feedback3");  
-                         Print.postMessage(res);
-                       }
-                       var cb4 = function(res) {
-                         Print.postMessage("In feedback4");  
-                         Print.postMessage(res);
-                       }
-                       
-                       Files.upload(file, false, Cryptpad, cb1, cb2, cb3, cb4);
-                       Print.postMessage("End require");  
-                      } catch (e) {
-                      Print.postMessage("Exception"); 
-                      Print.postMessage(e); 
-                     }
-                    }); 
-                    Print.postMessage("run");
-                    """;
-
-                          print(script);
-                          final future =
-                              flutterWebViewPlugin.evalJavascript(script);
-                          print("script run. Waiting feedback");
-
-                          future.whenComplete(() {
-                            print("script complete");
-                            // _showDialog("Message", "complete");
-                          });
-                          future.then((String result) {
-                            print("After eval");
-                            print(result);
-                            // _showDialog("Message", result);
-                          });
-                          future.catchError((Object result) {
-                            print("script error");
-                            _showDialog("Error", result);
-                          });
-                        } else {
-                          print("File " +
-                              filename +
-                              " already replicated to " +
-                              remotePath);
-                          _showDialog("Image already replicated", remotePath);
-                          currentIndex++;
-                        }
-                      });
-                    } else {
-                      print("No more images available");
-                    }
-                  })
+                    uploadProgress = 0;
+                    _readyForUpload(true).then((bool ready) {
+                      if (ready) {
+                        _uploadNextImage();
+                      } else {
+                        print("Upload cancelled");
+                      }
+                    });
+                  }),
+              FlatButton(
+                textColor: Colors.blue,
+                child: Text("Switch"),
+                onPressed: () {
+                  setState(() {
+                    if (currentView == "local")
+                      currentView = "cryptpad";
+                    else
+                      currentView = "local";
+                  });
+                },
+              ),
             ]),
-        body: StaggeredGridView.countBuilder(
-          padding: const EdgeInsets.all(8.0),
-          crossAxisCount: 3,
-          itemCount: assetList.length,
-          itemBuilder: (context, index) => FutureBuilder(
-            future: _loadImage(index),
-            builder: (BuildContext context, AsyncSnapshot<Image> image) {
-              return Container(
-                decoration: BoxDecoration(
-                    image: DecorationImage(
-                      image: image.data.image,
-                      fit: BoxFit.cover,
-                    ),
-                    borderRadius: BorderRadius.circular(10.0)),
-              );
-            },
-          ),
-          staggeredTileBuilder: (index) => _staggeredTiles[index],
-          mainAxisSpacing: 8.0,
-          crossAxisSpacing: 8.0,
-        ));
+        body: body);
   }
 }
