@@ -272,7 +272,7 @@ class MyHomePageState extends State<MyHomePage> {
                 uploadStarted = false;
                 uploadProgress = 0;
                 if (!silentUpload)
-                 _showDialog("Image replicated", message.message);
+                  _showDialog("Image replicated", message.message);
                 requestPermission();
               }
             }),
@@ -299,8 +299,10 @@ class MyHomePageState extends State<MyHomePage> {
             name: 'Drive',
             onMessageReceived: (JavascriptMessage message) {
               print("JAVASCRIPT Drive data: " + message.message);
-              driveData = jsonDecode(message.message);
-              remoteImagesList = new List<String>();
+              setState(() {
+                driveData = jsonDecode(message.message);
+                remoteImagesList = new List<String>();
+              });
               if ((driveData == null) ||
                   (driveData["cryptpad.username"] == null)) {
                 _showDialog("Error",
@@ -311,7 +313,9 @@ class MyHomePageState extends State<MyHomePage> {
             name: 'UploadProgress',
             onMessageReceived: (JavascriptMessage message) {
               print("JAVASCRIPT Upload progress: " + message.message);
-              uploadProgress = double.parse(message.message);
+              setState(() {
+                uploadProgress = double.parse(message.message);
+              });
             }),
         JavascriptChannel(
             name: 'UploadStatus',
@@ -343,6 +347,18 @@ class MyHomePageState extends State<MyHomePage> {
               file["thumbnail"] = thumbnail;
             }),
       ].toSet();
+
+      PhotoManager.addChangeCallback((value) {
+        // Force recheck of images
+        Future.delayed(new Duration(seconds: 2)).then((value) {
+          requestPermission().then((value) {
+            if (isAutoSync()) {
+              syncImages(10, true);
+            }
+          });
+        });
+      });
+      PhotoManager.startChangeNotify();
 
       startFlutterWebviewPlugin();
     });
@@ -410,7 +426,7 @@ class MyHomePageState extends State<MyHomePage> {
     return future;
   }
 
-  void requestPermission() async {
+  Future<Null> requestPermission() async {
     var result = await PhotoManager.requestPermission();
     if (result) {
       currentIndex = 0;
@@ -424,7 +440,6 @@ class MyHomePageState extends State<MyHomePage> {
       });
     } else {
       // fail
-      /// if result is fail, you can call `PhotoManager.openSetting();`  to open android/ios applicaton's setting to get permission
     }
   }
 
@@ -549,12 +564,13 @@ class MyHomePageState extends State<MyHomePage> {
     int nb = 0;
     DateTime now = DateTime.now();
     List<dynamic> imagesToSync = new List<dynamic>();
+    assetList.sort((e1, e2) => e2.createDateTime.compareTo(e1.createDateTime));
     for (var index = 0; index < assetList.length; index++) {
       AssetEntity entity = assetList[index];
       File file = await entity.file;
       DateTime fileDate = entity.createDateTime;
       var nbDays = now.difference(fileDate).inDays;
-      if (nbDays < maxDays) {
+      if (nbDays <= maxDays) {
         String filename = p.basename(file.path);
         // Check if we have not already pushed this image to cryptpad
         String currentRemotePage =
@@ -582,6 +598,8 @@ class MyHomePageState extends State<MyHomePage> {
             nbDays.toString() +
             " old so more than " +
             maxDays.toString());
+        // there cannot be more images to sync as all are older
+        return imagesToSync;
       }
     }
     return imagesToSync;
@@ -604,21 +622,22 @@ class MyHomePageState extends State<MyHomePage> {
       silentUpload = true;
       _syncImage(data, true);
       for (var i = 0; i < 10; i++) {
-         if (uploadStarted==false)
-           break;
-         await Future.delayed(new Duration(seconds: 2));
+        if (uploadStarted == false) break;
+        await Future.delayed(new Duration(seconds: 2));
       }
 
-      if (uploadStarted==true) {
+      if (uploadStarted == true) {
         if (!silence)
-         _showDialog(
-            "Error", "A sync did not finish in time. Stopped at sync " + nb.toString());
+          _showDialog(
+              "Error",
+              "A sync did not finish in time. Stopped at sync " +
+                  nb.toString());
         return;
       }
+      nb++;
     }
-    if (!silence)
-      _showDialog("Sync complete", nb.toString() + " images synced");
-    print("All sync done");
+    if (!silence) _showDialog("Sync", nb.toString() + " images synced");
+    print("Sync done: " + nb.toString() + " images");
   }
 
   Future<Map<String, dynamic>> waitForDriveData(int nb, int seconds) async {
@@ -805,8 +824,8 @@ class MyHomePageState extends State<MyHomePage> {
              UploadError.postMessage(res);
             }
            var uploadPending = function(res) {
-             Console.postMessage("In complete");  
-             Console.postMessage(res);
+             Console.postMessage("In pending");  
+             return true;
            }
            
            Files.upload(file, false, Cryptpad, uploadProgress, uploadComplete, uploadError, uploadPending);
@@ -869,13 +888,11 @@ class MyHomePageState extends State<MyHomePage> {
       future.catchError((Object result) {
         uploadStarted = false;
         print("script error");
-        if (!silence)
-         _showDialog("Error", result);
+        if (!silence) _showDialog("Error", result);
       });
     } else {
       print("File " + filename + " already replicated to " + remotePath);
-      if (!silence)
-       _showDialog("Image already replicated", remotePath);
+      if (!silence) _showDialog("Image already replicated", remotePath);
     }
   }
 
@@ -910,86 +927,108 @@ class MyHomePageState extends State<MyHomePage> {
     return true;
   }
 
+  Future<Null> _handleRefreshLocal() async {
+    setState(() {
+      requestPermission();
+    });
+    return null;
+  }
+
+  Future<Null> _handleRefreshRemote() async {
+    setState(() {
+      driveData = null;
+    });
+    await _getUserObject();
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     Widget body;
 
     if (currentView == "local")
-      body = new Stack(children: <Widget>[
-        LinearProgressIndicator(
-          value: uploadProgress / 100,
-          backgroundColor: Color(0),
-        ),
-        StaggeredGridView.countBuilder(
-          padding: const EdgeInsets.all(8.0),
-          crossAxisCount: 3,
-          itemCount: assetList.length,
-          itemBuilder: (context, index) => FutureBuilder(
-            future: _loadImageData(index),
-            builder: (BuildContext context, AsyncSnapshot snapshot) {
-              return new Stack(alignment: Alignment.bottomRight, children: <
-                  Widget>[
-                new Container(
+      body = new RefreshIndicator(
+          onRefresh: _handleRefreshLocal,
+          child: new Stack(children: <Widget>[
+            LinearProgressIndicator(
+              value: uploadProgress / 100,
+              backgroundColor: Color(0),
+            ),
+            StaggeredGridView.countBuilder(
+              padding: const EdgeInsets.all(8.0),
+              crossAxisCount: 3,
+              itemCount: assetList.length,
+              itemBuilder: (context, index) => FutureBuilder(
+                future: _loadImageData(index),
+                builder: (BuildContext context, AsyncSnapshot snapshot) {
+                  return new Stack(
+                      alignment: Alignment.bottomRight,
+                      children: <Widget>[
+                        new Container(
+                          decoration: BoxDecoration(
+                              image: DecorationImage(
+                                image: (snapshot.data == null)
+                                    ? new AssetImage(
+                                        'assets/cryptpad-logo-white-50.png')
+                                    : snapshot.data[0].image,
+                                fit: BoxFit.cover,
+                              ),
+                              borderRadius: BorderRadius.circular(10.0)),
+                        ),
+                        new Container(
+                            height: (snapshot.data != null &&
+                                    snapshot.data[1] == true)
+                                ? 25
+                                : 0,
+                            width: (snapshot.data != null &&
+                                    snapshot.data[1] == true)
+                                ? 25
+                                : 0,
+                            margin: EdgeInsets.only(bottom: 5, right: 5),
+                            decoration: BoxDecoration(
+                              image: DecorationImage(
+                                image: new AssetImage(
+                                    'assets/cryptpad-logo-white-50.png'),
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            alignment: Alignment.bottomRight)
+                      ]);
+                },
+              ),
+              staggeredTileBuilder: (index) =>
+                  _staggeredTiles[index % _staggeredTiles.length],
+              mainAxisSpacing: 8.0,
+              crossAxisSpacing: 8.0,
+            )
+          ]));
+    else
+      body = new RefreshIndicator(
+          onRefresh: _handleRefreshRemote,
+          child: new StaggeredGridView.countBuilder(
+            padding: const EdgeInsets.all(8.0),
+            crossAxisCount: 3,
+            itemCount: _getDriveImageNumber(),
+            itemBuilder: (context, index) => FutureBuilder(
+              future: _loadDriveImageData(index),
+              builder: (BuildContext context, AsyncSnapshot snapshot) {
+                return new Container(
                   decoration: BoxDecoration(
                       image: DecorationImage(
                         image: (snapshot.data == null)
-                            ? new AssetImage(
-                                'assets/cryptpad-logo-white-50.png')
-                            : snapshot.data[0].image,
+                            ? new AssetImage('assets/cryptpad-logo-50.png')
+                            : snapshot.data,
                         fit: BoxFit.cover,
                       ),
                       borderRadius: BorderRadius.circular(10.0)),
-                ),
-                new Container(
-                    height: (snapshot.data != null && snapshot.data[1] == true)
-                        ? 25
-                        : 0,
-                    width: (snapshot.data != null && snapshot.data[1] == true)
-                        ? 25
-                        : 0,
-                    margin: EdgeInsets.only(bottom: 5, right: 5),
-                    decoration: BoxDecoration(
-                      image: DecorationImage(
-                        image:
-                            new AssetImage('assets/cryptpad-logo-white-50.png'),
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                    alignment: Alignment.bottomRight)
-              ]);
-            },
-          ),
-          staggeredTileBuilder: (index) =>
-              _staggeredTiles[index % _staggeredTiles.length],
-          mainAxisSpacing: 8.0,
-          crossAxisSpacing: 8.0,
-        )
-      ]);
-    else
-      body = new StaggeredGridView.countBuilder(
-        padding: const EdgeInsets.all(8.0),
-        crossAxisCount: 3,
-        itemCount: _getDriveImageNumber(),
-        itemBuilder: (context, index) => FutureBuilder(
-          future: _loadDriveImageData(index),
-          builder: (BuildContext context, AsyncSnapshot snapshot) {
-            return new Container(
-              decoration: BoxDecoration(
-                  image: DecorationImage(
-                    image: (snapshot.data == null)
-                        ? new AssetImage('assets/cryptpad-logo-50.png')
-                        : snapshot.data,
-                    fit: BoxFit.cover,
-                  ),
-                  borderRadius: BorderRadius.circular(10.0)),
-            );
-          },
-        ),
-        staggeredTileBuilder: (index) =>
-            _staggeredTiles[index % _staggeredTiles.length],
-        mainAxisSpacing: 8.0,
-        crossAxisSpacing: 8.0,
-      );
+                );
+              },
+            ),
+            staggeredTileBuilder: (index) =>
+                _staggeredTiles[index % _staggeredTiles.length],
+            mainAxisSpacing: 8.0,
+            crossAxisSpacing: 8.0,
+          ));
 
     return Scaffold(
         backgroundColor: Colors.white,
@@ -1017,7 +1056,9 @@ class MyHomePageState extends State<MyHomePage> {
               ),
               FlatButton(
                   textColor: Colors.blue,
-                  child: Icon(Icons.refresh),
+                  child: Icon((driveData == null)
+                      ? Icons.settings_remote
+                      : Icons.refresh),
                   onPressed: () {
                     restartFlutterWebviewPlugin().then((str) {
                       print("Finished reload");
