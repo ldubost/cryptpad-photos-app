@@ -11,8 +11,11 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'package:cryptpad_photos_app/preferences.dart';
+import 'package:logger/logger.dart';
+import 'package:logger_flutter/logger_flutter.dart';
 
 enum ConfirmAction { CANCEL, ACCEPT }
+var logger = Logger();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,8 +31,8 @@ final Set<JavascriptChannel> jsChannels1 = [
   JavascriptChannel(
       name: 'Print1',
       onMessageReceived: (JavascriptMessage message) {
-        print("JSMESSAGE MAIN");
-        print(message.message);
+        logger.d("JSMESSAGE MAIN");
+        logger.d(message.message);
       }),
 ].toSet();
 
@@ -161,6 +164,7 @@ class MyHomePageState extends State<MyHomePage> {
   Base64Codec base64 = const Base64Codec();
 
   bool uploadStarted = false;
+  bool autoSyncStarted = false;
   bool silentUpload = false;
   bool reloadWebView = false;
   Map<String, dynamic> driveData;
@@ -238,20 +242,20 @@ class MyHomePageState extends State<MyHomePage> {
     try {
       mDays = prefs.getString('maxdays');
     } catch (e) {
-      print("Cannot read max days");
+      logger.d("Cannot read max days");
     }
 
     setMaxDays(int.parse(mDays));
     startPage = prefs.getString("startpage");
     if (startPage == null) startPage = "local";
 
-    print("Current settings");
-    print("URL: " + getCryptPadInstanceURL());
-    print("autoSync: " + autoSync.toString());
-    print("autoSyncWifiOnly: " + autoSyncWifiOnly.toString());
-    print("syncVideos: " + syncVideos.toString());
-    print("maxDays: " + maxDays.toString());
-    print("startPage: " + startPage);
+    logger.d("Current settings");
+    logger.d("URL: " + getCryptPadInstanceURL());
+    logger.d("autoSync: " + autoSync.toString());
+    logger.d("autoSyncWifiOnly: " + autoSyncWifiOnly.toString());
+    logger.d("syncVideos: " + syncVideos.toString());
+    logger.d("maxDays: " + maxDays.toString());
+    logger.d("startPage: " + startPage);
   }
 
   @override
@@ -263,10 +267,10 @@ class MyHomePageState extends State<MyHomePage> {
         JavascriptChannel(
             name: 'UploadComplete',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT MESSAGE: " + message.message);
+              logger.d("JAVASCRIPT MESSAGE: " + message.message);
               if (message.message.startsWith("/file/")) {
                 // Persist the remote path on the CryptPad server
-                print("Persisting output for " + currentFilename);
+                logger.d("Persisting output for " + currentFilename);
                 saveString(
                     getCryptPadInstanceURL(), currentFilename, message.message);
                 uploadStarted = false;
@@ -282,23 +286,23 @@ class MyHomePageState extends State<MyHomePage> {
               flutterWebViewPluginLoaded = true;
               // load the drive data
               _getUserObject();
-              print("JAVASCRIPT CryptPadReady");
+              logger.d("JAVASCRIPT CryptPadReady");
             }),
         JavascriptChannel(
             name: 'Console',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT Console: " + message.message);
+              logger.d("JAVASCRIPT Console: " + message.message);
             }),
         JavascriptChannel(
             name: 'Alert',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT Alert: " + message.message);
+              logger.d("JAVASCRIPT Alert: " + message.message);
               _showDialog("Alert", message.message);
             }),
         JavascriptChannel(
             name: 'Drive',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT Drive data: " + message.message);
+              logger.d("JAVASCRIPT Drive data: " + message.message);
               setState(() {
                 driveData = jsonDecode(message.message);
                 remoteImagesList = new List<String>();
@@ -307,12 +311,17 @@ class MyHomePageState extends State<MyHomePage> {
                   (driveData["cryptpad.username"] == null)) {
                 _showDialog("Error",
                     "You are not connected to CryptPad. Use the CryptPad view to login.");
+              } else {
+                // Forcing a sync if autoSync is enabled
+                if (isAutoSync()) {
+                  syncImages(10, true);
+                }
               }
             }),
         JavascriptChannel(
             name: 'UploadProgress',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT Upload progress: " + message.message);
+              logger.d("JAVASCRIPT Upload progress: " + message.message);
               setState(() {
                 uploadProgress = double.parse(message.message);
               });
@@ -320,13 +329,13 @@ class MyHomePageState extends State<MyHomePage> {
         JavascriptChannel(
             name: 'UploadStatus',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT Upload status: " + message.message);
+              logger.d("JAVASCRIPT Upload status: " + message.message);
               uploadStatus = jsonDecode(message.message);
             }),
         JavascriptChannel(
             name: 'UploadError',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT Upload error: " + message.message);
+              logger.d("JAVASCRIPT Upload error: " + message.message);
               if (message.message == "RPC_NOT_READY") {
                 _showDialog("Upload Error",
                     "You are not connected to CryptPad. Use the cryptpad view to login.");
@@ -339,7 +348,7 @@ class MyHomePageState extends State<MyHomePage> {
         JavascriptChannel(
             name: 'GetFileMetadata',
             onMessageReceived: (JavascriptMessage message) {
-              print("JAVASCRIPT GetMetadata: " + message.message);
+              logger.d("JAVASCRIPT GetMetadata: " + message.message);
               var data = jsonDecode(message.message);
               var href = data["href"];
               var thumbnail = data["metadata"]["thumbnail"];
@@ -388,13 +397,13 @@ class MyHomePageState extends State<MyHomePage> {
                                                Console.postMessage("Test cryptpad ready end");
                                                """);
         });
-        print("WebView loaded");
+        logger.d("WebView loaded");
       }
     });
     _onHttpError =
         flutterWebViewPlugin.onHttpError.listen((WebViewHttpError error) {
-      print("In HTTP error for url: " + error.url);
-      print("Error code: " + error.code);
+      logger.d("In HTTP error for url: " + error.url);
+      logger.d("Error code: " + error.code);
       if (error.code == "-6") {
         _showDialog("Error",
             "An error occured while loading CryptPad. Check your settings.");
@@ -410,7 +419,7 @@ class MyHomePageState extends State<MyHomePage> {
 
   Future<Null> _loadWebView() async {
     var url = getCryptPadInstanceURL() + "drive/";
-    print("WebView launch: " + url);
+    logger.d("WebView launch: " + url);
     var future = flutterWebViewPlugin.launch(url,
         javascriptChannels: jsChannels,
         hidden: true,
@@ -421,7 +430,7 @@ class MyHomePageState extends State<MyHomePage> {
           500.0,
         ));
     future.then((value) {
-      print("Webview launch done");
+      logger.d("Webview launch done");
     });
     return future;
   }
@@ -502,8 +511,8 @@ class MyHomePageState extends State<MyHomePage> {
         ? ""
         : await getString(getCryptPadInstanceURL(), filename);
     bool isReplicated = (currentRemotePage != null);
-    // print("Image: " + filename + " remote: " + currentRemotePage.toString() + " isReplicated: " + isReplicated.toString());
-    return [Image.file(await entity.file), isReplicated];
+    // logger.d("Image: " + filename + " remote: " + currentRemotePage.toString() + " isReplicated: " + isReplicated.toString());
+    return [Image.file(await entity.file), isReplicated, filename];
   }
 
   Future<List> getImage(index) async {
@@ -523,7 +532,7 @@ class MyHomePageState extends State<MyHomePage> {
     // Check if we find this image in the drive data
     var remoteImageData = await _getRemoteImageData(filename, false);
     if (remoteImageData != null) {
-      print("Image already in drive");
+      logger.d("Image already in drive");
       currentIndex++;
       return getImage(index + 1);
     }
@@ -579,13 +588,13 @@ class MyHomePageState extends State<MyHomePage> {
           // Check if we find this image in the drive data
           var remoteImageData = await _getRemoteImageData(filename, false);
           if (remoteImageData != null) {
-            print("Image already in drive");
+            logger.d("Image already in drive");
           } else {
             nb++;
             // Retrieve base64 thumbnail
             String b64 = base64.encode(await entity.thumbDataWithSize(100, 100,
                 format: ThumbFormat.png));
-            print("Adding image " + filename + " to images to sync");
+            logger.d("Adding image " + filename + " to images to sync");
             imagesToSync
                 .add([await entity.fullData, filename, currentRemotePage, b64]);
             if (nb > max) {
@@ -594,7 +603,7 @@ class MyHomePageState extends State<MyHomePage> {
           }
         }
       } else {
-        print("Images is " +
+        logger.d("Images is " +
             nbDays.toString() +
             " old so more than " +
             maxDays.toString());
@@ -606,17 +615,24 @@ class MyHomePageState extends State<MyHomePage> {
   }
 
   Future<Null> syncImages(int max, bool silence) async {
+    if (autoSyncStarted == true) {
+      logger.d("A sync is already in progress");
+      return;
+    }
+
+    autoSyncStarted = true;
     List<dynamic> images = await getImagesToSync(max);
     if (images.length >= max) {
       ConfirmAction action = await _asyncConfirmDialog(
           "There are more than " + max.toString() + " images to sync",
           "Would you like to cancel the sync or still perform it ?");
       if (action == ConfirmAction.CANCEL) {
+        autoSyncStarted = false;
         return;
       }
     }
 
-    print("Starting sync");
+    logger.d("Starting sync");
     int nb = 0;
     for (List<dynamic> data in images) {
       silentUpload = true;
@@ -632,12 +648,14 @@ class MyHomePageState extends State<MyHomePage> {
               "Error",
               "A sync did not finish in time. Stopped at sync " +
                   nb.toString());
+        autoSyncStarted = false;
         return;
       }
       nb++;
     }
     if (!silence) _showDialog("Sync", nb.toString() + " images synced");
-    print("Sync done: " + nb.toString() + " images");
+    logger.d("Sync done: " + nb.toString() + " images");
+    autoSyncStarted = false;
   }
 
   Future<Map<String, dynamic>> waitForDriveData(int nb, int seconds) async {
@@ -663,25 +681,25 @@ class MyHomePageState extends State<MyHomePage> {
     for (var key in filesData.keys) {
       var value = filesData[key];
       if (value["title"] == filename) {
-        print("Found remote value: " + value.toString());
+        logger.d("Found remote value: " + value.toString());
         // store this locally
         var href = value["href"];
         saveString(getCryptPadInstanceURL(), filename, href);
         return value;
       }
     }
-    print("Did not find remote value");
+    logger.d("Did not find remote value");
     return null;
   }
 
-  Future<ImageProvider> _loadDriveImageData(index) async {
+  Future<List<dynamic>> _loadDriveImageData(index) async {
     var href = remoteImagesList[index];
     var file = remoteImagesListMap[href];
     var name = file["title"];
     var image = file["image"];
     if (image != null) {
-      print("Found image in cache for " + href + " " + name);
-      return image;
+      logger.d("Found image in cache for " + href + " " + name);
+      return [image, name];
     }
 
     var thumbnail = file["thumbnail"];
@@ -707,22 +725,22 @@ class MyHomePageState extends State<MyHomePage> {
     for (var i = 0; i < 10; i++) {
       thumbnail = file["thumbnail"];
       if (thumbnail != null) {
-        print("Found thumbnail for " + href + " " + name);
+        logger.d("Found thumbnail for " + href + " " + name);
         break;
       }
       await Future.delayed(new Duration(seconds: 3));
     }
 
     if (thumbnail != null) {
-      print("Decoding base64 image for " + href + " " + name);
+      logger.d("Decoding base64 image for " + href + " " + name);
       var bytes =
           base64.decode(thumbnail.substring(thumbnail.indexOf(",") + 1));
       var image = new Image.memory(bytes);
       file["image"] = image.image;
-      return image.image;
+      return [image.image, name];
     }
 
-    print("Could not find image for " + href + " " + name);
+    logger.d("Could not find image for " + href + " " + name);
     return null;
   }
 
@@ -732,12 +750,12 @@ class MyHomePageState extends State<MyHomePage> {
   int _getDriveImageNumber() {
     try {
       if (driveData == null) {
-        print("Drive not loaded");
+        logger.d("Drive not loaded");
         return 0;
       }
 
       if (remoteImagesList.length == 0) {
-        print("Sorting drive files list");
+        logger.d("Sorting drive files list");
         int nb = 0;
         Map filesData = driveData["drive"]["filesData"];
         var sortedMap = Map.fromEntries(filesData.entries.toList()
@@ -753,15 +771,15 @@ class MyHomePageState extends State<MyHomePage> {
             nb++;
           }
         }
-        print("Found " + nb.toString() + " images");
+        logger.d("Found " + nb.toString() + " images");
         return nb;
       } else {
-        print("Drive already sorted");
+        logger.d("Drive already sorted");
         return remoteImagesList.length;
       }
     } catch (e) {
-      print("Exception counting images");
-      print(e);
+      logger.d("Exception counting images");
+      logger.d(e);
       return 0;
     }
   }
@@ -852,12 +870,12 @@ class MyHomePageState extends State<MyHomePage> {
           _syncImage(data, false);
         } else {
           _showDialog("Information", "All images have been synced");
-          print("No more images available");
+          logger.d("No more images available");
         }
       });
     } else {
       _showDialog("Information", "All images have been synced");
-      print("No more images available");
+      logger.d("No more images available");
     }
   }
 
@@ -866,32 +884,32 @@ class MyHomePageState extends State<MyHomePage> {
     var filename = data[1];
     var remotePath = data[2];
     var b64 = data[3];
-    print("File path " + filename);
+    logger.d("File path " + filename);
 
     if (remotePath == null || remotePath == "") {
       uploadStarted = true;
       currentFilename = filename;
-      print(imageData.length);
+      logger.d(imageData.length);
 
       String script = _getUploadScript(imageData, filename, b64);
-      print("Running script");
-      print(script);
+      logger.d("Running script");
+      logger.d(script);
       final future = flutterWebViewPlugin.evalJavascript(script);
-      print("script run. Waiting feedback");
+      logger.d("script run. Waiting feedback");
       future.whenComplete(() {
-        print("script complete");
+        logger.d("script complete");
       });
       future.then((String result) {
-        print("script launched");
-        print(result);
+        logger.d("script launched");
+        logger.d(result);
       });
       future.catchError((Object result) {
         uploadStarted = false;
-        print("script error");
+        logger.d("script error");
         if (!silence) _showDialog("Error", result);
       });
     } else {
-      print("File " + filename + " already replicated to " + remotePath);
+      logger.d("File " + filename + " already replicated to " + remotePath);
       if (!silence) _showDialog("Image already replicated", remotePath);
     }
   }
@@ -899,7 +917,7 @@ class MyHomePageState extends State<MyHomePage> {
   Future<bool> _readyForUpload(bool withStarted) async {
     // Check if flutter webview is loaded
     if (flutterWebViewPluginLoaded == false) {
-      print("WebView not loaded");
+      logger.d("WebView not loaded");
       _showDialog("Error", "WebView is not loaded.");
       return false;
     }
@@ -916,14 +934,14 @@ class MyHomePageState extends State<MyHomePage> {
           "Upload already in progress",
           "Would you like to cancel it and launch a new upload ?");
       if (action == ConfirmAction.ACCEPT) {
-        print("Forcing upload");
+        logger.d("Forcing upload");
         return true;
       } else {
         return false;
       }
     }
 
-    print("Ready for upload");
+    logger.d("Ready for upload");
     return true;
   }
 
@@ -950,6 +968,11 @@ class MyHomePageState extends State<MyHomePage> {
       body = new RefreshIndicator(
           onRefresh: _handleRefreshLocal,
           child: new Stack(children: <Widget>[
+            LogConsoleOnShake(
+                dark: true,
+                child: Center(
+                  child: Text("Shake Phone to open Console."),
+                )),
             LinearProgressIndicator(
               value: uploadProgress / 100,
               backgroundColor: Color(0),
@@ -961,7 +984,7 @@ class MyHomePageState extends State<MyHomePage> {
               itemBuilder: (context, index) => FutureBuilder(
                 future: _loadImageData(index),
                 builder: (BuildContext context, AsyncSnapshot snapshot) {
-                  return new Stack(
+                  return new Tooltip(message: (snapshot.data == null) ? "Image" : snapshot.data[2], child: new Stack(
                       alignment: Alignment.bottomRight,
                       children: <Widget>[
                         new Container(
@@ -993,7 +1016,7 @@ class MyHomePageState extends State<MyHomePage> {
                               ),
                             ),
                             alignment: Alignment.bottomRight)
-                      ]);
+                      ]));
                 },
               ),
               staggeredTileBuilder: (index) =>
@@ -1012,16 +1035,16 @@ class MyHomePageState extends State<MyHomePage> {
             itemBuilder: (context, index) => FutureBuilder(
               future: _loadDriveImageData(index),
               builder: (BuildContext context, AsyncSnapshot snapshot) {
-                return new Container(
+                return new Tooltip(message: (snapshot.data == null) ? "Image" : snapshot.data[1], child: new Container(
                   decoration: BoxDecoration(
                       image: DecorationImage(
                         image: (snapshot.data == null)
                             ? new AssetImage('assets/cryptpad-logo-50.png')
-                            : snapshot.data,
+                            : snapshot.data[0],
                         fit: BoxFit.cover,
                       ),
                       borderRadius: BorderRadius.circular(10.0)),
-                );
+                ));
               },
             ),
             staggeredTileBuilder: (index) =>
@@ -1040,78 +1063,90 @@ class MyHomePageState extends State<MyHomePage> {
             backgroundColor: Colors.transparent,
             iconTheme: IconThemeData(color: Colors.black),
             actions: <Widget>[
-              FlatButton(
-                textColor: Colors.blue,
-                child: Icon(Icons.settings),
-                onPressed: () {
-                  Navigator.of(context).pushNamed('/preferences');
-                },
-              ),
-              FlatButton(
-                textColor: Colors.blue,
-                child: Icon(Icons.web),
-                onPressed: () {
-                  Navigator.of(context).pushNamed('/cryptpad');
-                },
-              ),
-              FlatButton(
-                  textColor: Colors.blue,
-                  child: Icon((driveData == null)
-                      ? Icons.settings_remote
-                      : Icons.refresh),
-                  onPressed: () {
-                    restartFlutterWebviewPlugin().then((str) {
-                      print("Finished reload");
-                      setState(() {
-                        driveData = null;
-                        remoteImagesList = new List<String>();
-                      });
-                      waitForDriveData(10, 1).then((value) {
-                        setState(() {
-                          remoteImagesList = new List<String>();
+              new Tooltip(
+                  message: "Settings",
+                  child: FlatButton(
+                    textColor: Colors.blue,
+                    child: Icon(Icons.settings),
+                    onPressed: () {
+                      Navigator.of(context).pushNamed('/preferences');
+                    },
+                  )),
+              new Tooltip(
+                  message: "Login / CryptPad View",
+                  child: FlatButton(
+                    textColor: Colors.blue,
+                    child: Icon(Icons.web),
+                    onPressed: () {
+                      Navigator.of(context).pushNamed('/cryptpad');
+                    },
+                  )),
+              new Tooltip(
+                  message: "Force reconnect",
+                  child: FlatButton(
+                      textColor: Colors.blue,
+                      child: Icon((driveData == null)
+                          ? Icons.settings_remote
+                          : Icons.refresh),
+                      onPressed: () {
+                        restartFlutterWebviewPlugin().then((str) {
+                          logger.d("Finished reload");
+                          setState(() {
+                            driveData = null;
+                            remoteImagesList = new List<String>();
+                          });
+                          waitForDriveData(10, 1).then((value) {
+                            setState(() {
+                              remoteImagesList = new List<String>();
+                            });
+                          });
                         });
+                        requestPermission();
+                      })),
+              new Tooltip(
+                  message: "Sync one image",
+                  child: FlatButton(
+                      textColor: Colors.blue,
+                      child: Icon(Icons.content_copy),
+                      onPressed: () {
+                        uploadProgress = 0;
+                        _readyForUpload(true).then((bool ready) {
+                          if (ready) {
+                            _uploadNextImage();
+                          } else {
+                            logger.d("Upload cancelled");
+                          }
+                        });
+                      })),
+              new Tooltip(
+                  message: "Sync All",
+                  child: FlatButton(
+                      textColor: Colors.blue,
+                      child: Icon(Icons.sync),
+                      onPressed: () {
+                        uploadProgress = 0;
+                        _readyForUpload(true).then((bool ready) {
+                          if (ready) {
+                            syncImages(10, false);
+                          } else {
+                            logger.d("Upload cancelled");
+                          }
+                        });
+                      })),
+              new Tooltip(
+                  message: "Switch View",
+                  child: FlatButton(
+                    textColor: Colors.blue,
+                    child: Icon(Icons.image),
+                    onPressed: () {
+                      setState(() {
+                        if (currentView == "local")
+                          currentView = "cryptpad";
+                        else
+                          currentView = "local";
                       });
-                    });
-                    requestPermission();
-                  }),
-              FlatButton(
-                  textColor: Colors.blue,
-                  child: Icon(Icons.content_copy),
-                  onPressed: () {
-                    uploadProgress = 0;
-                    _readyForUpload(true).then((bool ready) {
-                      if (ready) {
-                        _uploadNextImage();
-                      } else {
-                        print("Upload cancelled");
-                      }
-                    });
-                  }),
-              FlatButton(
-                  textColor: Colors.blue,
-                  child: Icon(Icons.sync),
-                  onPressed: () {
-                    uploadProgress = 0;
-                    _readyForUpload(true).then((bool ready) {
-                      if (ready) {
-                        syncImages(10, false);
-                      } else {
-                        print("Upload cancelled");
-                      }
-                    });
-                  }),
-              FlatButton(
-                textColor: Colors.blue,
-                child: Icon(Icons.image),
-                onPressed: () {
-                  setState(() {
-                    if (currentView == "local")
-                      currentView = "cryptpad";
-                    else
-                      currentView = "local";
-                  });
-                },
-              ),
+                    },
+                  )),
             ]),
         body: body);
   }
