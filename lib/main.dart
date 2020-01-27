@@ -823,9 +823,9 @@ class MyHomePageState extends State<MyHomePage> {
              Console.postMessage(res);
              UploadError.postMessage(res);
             }
-           var uploadPending = function(res) {
+           var uploadPending = function(cb) {
              Console.postMessage("In pending");  
-             return true;
+             cb();
            }
            
            Files.upload(file, false, Cryptpad, uploadProgress, uploadComplete, uploadError, uploadPending);
