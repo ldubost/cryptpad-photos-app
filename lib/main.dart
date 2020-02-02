@@ -13,6 +13,8 @@ import 'dart:convert';
 import 'package:cryptpad_photos_app/preferences.dart';
 import 'package:logger/logger.dart';
 import 'package:logger_flutter/logger_flutter.dart';
+import 'package:photo_view/photo_view.dart';
+import 'package:photo_view/photo_view_gallery.dart';
 
 enum ConfirmAction { CANCEL, ACCEPT }
 var logger = Logger();
@@ -56,6 +58,9 @@ class PhotosApp extends StatelessWidget {
         '/cryptpad': (_) {
           return _cryptpadLoginWidget();
         },
+        '/photo': (_) {
+          return homePage.homePageState.photoViewWidget();
+        }
       },
     );
   }
@@ -106,12 +111,16 @@ class PhotosApp extends StatelessWidget {
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({Key key, this.title}) : super(key: key);
+  MyHomePageState homePageState;
+
+  MyHomePage({Key key, this.title}) : super(key: key) {
+    homePageState =  MyHomePageState();
+  }
 
   final String title;
 
   @override
-  MyHomePageState createState() => MyHomePageState();
+  MyHomePageState createState() => homePageState;
 
   String getCryptPadInstanceURL() {
     return MyHomePageState.getCryptPadInstanceURL();
@@ -120,6 +129,11 @@ class MyHomePage extends StatefulWidget {
 
 class MyHomePageState extends State<MyHomePage> {
   String currentView = "local";
+  int selectedImageindex = 0;
+  String selectedLocalImage = "";
+  Image selectedImage = null;
+  bool selectedImageFail = false;
+
   List<AssetPathEntity> imagesList = [];
   List<AssetEntity> assetList = [];
   Map<String, dynamic> remoteImagesListMap = new Map<String, dynamic>();
@@ -354,6 +368,24 @@ class MyHomePageState extends State<MyHomePage> {
               var thumbnail = data["metadata"]["thumbnail"];
               var file = remoteImagesListMap[href];
               file["thumbnail"] = thumbnail;
+            }),
+        JavascriptChannel(
+            name: 'GetFileFulldata',
+            onMessageReceived: (JavascriptMessage message) {
+              logger.d("JAVASCRIPT GetFileFulldata: " + message.message);
+              var data = message.message;
+              var bytes = null;
+              try {
+                var bytes = base64.decode(data);
+                Image image = new Image.memory(bytes);
+                setState(() {
+                  selectedImage = image;
+                });
+              } catch (e) {
+                selectedImageFail = true;
+                logger.d("Error decoding base64 image data");
+                logger.d(e);
+              }
             }),
       ].toSet();
 
@@ -637,7 +669,7 @@ class MyHomePageState extends State<MyHomePage> {
     for (List<dynamic> data in images) {
       silentUpload = true;
       _syncImage(data, true);
-      for (var i = 0; i < 10; i++) {
+      for (var i = 0; i < 50; i++) {
         if (uploadStarted == false) break;
         await Future.delayed(new Duration(seconds: 2));
       }
@@ -698,7 +730,7 @@ class MyHomePageState extends State<MyHomePage> {
     var name = file["title"];
     var image = file["image"];
     if (image != null) {
-      logger.d("Found image in cache for " + href + " " + name);
+      // logger.d("Found image in cache for " + href + " " + name);
       return [image, name];
     }
 
@@ -733,8 +765,10 @@ class MyHomePageState extends State<MyHomePage> {
 
     if (thumbnail != null) {
       logger.d("Decoding base64 image for " + href + " " + name);
+      var str = thumbnail.substring(thumbnail.indexOf(",") + 1);
+      logger.d(str);
       var bytes =
-          base64.decode(thumbnail.substring(thumbnail.indexOf(",") + 1));
+          base64.decode(str);
       var image = new Image.memory(bytes);
       file["image"] = image.image;
       return [image.image, name];
@@ -782,6 +816,114 @@ class MyHomePageState extends State<MyHomePage> {
       logger.d(e);
       return 0;
     }
+  }
+
+  Widget photoViewWidget() {
+    if (currentView=="local")
+      return FutureBuilder(
+          future: _loadImageData(selectedImageindex),
+          builder: (BuildContext context, AsyncSnapshot snapshot) {
+            return Container(
+                child: PhotoView(
+                  imageProvider: (snapshot.data == null)
+                      ? new AssetImage(
+                      'assets/cryptpad-logo-512.png')
+                      : snapshot.data[0].image
+                ));
+          });
+    else
+      return FutureBuilder(
+          future: _loadDriveImageFullData(selectedImageindex),
+          builder: (BuildContext context, AsyncSnapshot snapshot) {
+            return Container(
+                child: PhotoView(
+                    imageProvider: (snapshot.data == null)
+                        ? new AssetImage(
+                        'assets/cryptpad-logo-512.png')
+                        : snapshot.data.image
+                ));
+          });
+  }
+
+  /*
+  Function to read the full file decrypted data from the href of the file pad
+  The return is going through the JSChannel called GetFileFulldata
+   */
+  Future<Image> _loadDriveImageFullData(index) async {
+    selectedImage = null;
+    selectedImageFail = false;
+    var href = remoteImagesList[index];
+    var file = remoteImagesListMap[href];
+    logger.d("_loadDriveImageFullData Getting image: " + href + " " + file["channel"]);
+    var script = """
+    Console.postMessage("In script");     
+    require(['/file/file-crypto.js'], function (FileCrypto) {
+       function _arrayBufferToBase64( buffer ) {
+          var binary = '';
+          var bytes = new Uint8Array( buffer );
+          var len = bytes.byteLength;
+          for (var i = 0; i < len; i++) {
+              binary += String.fromCharCode( bytes[ i ] );
+          }
+          return window.btoa( binary );
+       }
+       
+       var readFile = function(fData, cb) {
+         try {
+         var href = (fData.href && fData.href.indexOf('#') !== -1) ? fData.href : fData.roHref;
+         var parsed = CryptPad_Hash.parsePadUrl(href);
+         var hash = parsed.hash;
+         var name = fData.filename || fData.title;
+      
+         var secret = CryptPad_Hash.getSecrets('file', hash, fData.password);
+         var src = CryptPad_Hash.getBlobPathFromHex(fData.channel);
+         var key = secret.keys && secret.keys.cryptKey;
+         CryptPad_Util.fetch(src, function (err, u8) {
+            FileCrypto.decrypt(u8, key, function (err, res) {
+              var reader = new FileReader();
+              reader.addEventListener("loadend", function() {
+              cb(reader.result);
+              });
+              reader.readAsArrayBuffer(res.content); 
+            });
+         }); 
+         } catch (e) {
+          Console.postMessage("Error");
+          Console.postMessage(e);
+         } 
+       };
+       Console.postMessage("In readfile prepare data");     
+       var fData = {
+        "channel": '""" + file["channel"] + """',
+        "href": '""" + href + """',
+       }
+       readFile(fData, function(data) {
+        Console.postMessage("In readfile feedback");     
+        GetFileFulldata.postMessage(_arrayBufferToBase64(data)); 
+       }); 
+    });
+    Console.postMessage("End script");     
+ """;
+    logger.d("Launching javascript");
+    logger.d(script);
+    flutterWebViewPlugin.evalJavascript(script);
+
+    logger.d("Waiting for image load");
+    for (var i = 0; i < 10; i++) {
+      if (selectedImage!=null) {
+        logger.d("Image has been loaded");
+        return selectedImage;
+      }
+      if (selectedImageFail) {
+        logger.d("Image failed to load");
+        return null;
+
+      }
+      await Future.delayed(new Duration(seconds: 3));
+      logger.d("Waiting more");
+    }
+    logger.d("Giving up");
+    return null;
   }
 
   @override
@@ -968,11 +1110,7 @@ class MyHomePageState extends State<MyHomePage> {
       body = new RefreshIndicator(
           onRefresh: _handleRefreshLocal,
           child: new Stack(children: <Widget>[
-            LogConsoleOnShake(
-                dark: true,
-                child: Center(
-                  child: Text("Shake Phone to open Console."),
-                )),
+            LogConsoleOnShake(dark: true, child: new Text("")),
             LinearProgressIndicator(
               value: uploadProgress / 100,
               backgroundColor: Color(0),
@@ -984,39 +1122,49 @@ class MyHomePageState extends State<MyHomePage> {
               itemBuilder: (context, index) => FutureBuilder(
                 future: _loadImageData(index),
                 builder: (BuildContext context, AsyncSnapshot snapshot) {
-                  return new Tooltip(message: (snapshot.data == null) ? "Image" : snapshot.data[2], child: new Stack(
-                      alignment: Alignment.bottomRight,
-                      children: <Widget>[
-                        new Container(
-                          decoration: BoxDecoration(
-                              image: DecorationImage(
-                                image: (snapshot.data == null)
-                                    ? new AssetImage(
-                                        'assets/cryptpad-logo-white-50.png')
-                                    : snapshot.data[0].image,
-                                fit: BoxFit.cover,
-                              ),
-                              borderRadius: BorderRadius.circular(10.0)),
-                        ),
-                        new Container(
-                            height: (snapshot.data != null &&
-                                    snapshot.data[1] == true)
-                                ? 25
-                                : 0,
-                            width: (snapshot.data != null &&
-                                    snapshot.data[1] == true)
-                                ? 25
-                                : 0,
-                            margin: EdgeInsets.only(bottom: 5, right: 5),
-                            decoration: BoxDecoration(
-                              image: DecorationImage(
-                                image: new AssetImage(
-                                    'assets/cryptpad-logo-white-50.png'),
-                                fit: BoxFit.cover,
-                              ),
-                            ),
-                            alignment: Alignment.bottomRight)
-                      ]));
+                  return new Tooltip(
+                      message:
+                          (snapshot.data == null) ? "Image" : snapshot.data[2],
+                      child: new GestureDetector(
+                          onTap: () {
+                            selectedImageindex = index;
+                            Navigator.of(context).pushNamed('/photo');
+                          },
+                          child: new Stack(
+                              alignment: Alignment.bottomRight,
+                              children: <Widget>[
+                                new Container(
+                                  decoration: BoxDecoration(
+                                      image: DecorationImage(
+                                        image: (snapshot.data == null)
+                                            ? new AssetImage(
+                                                'assets/cryptpad-logo-white-50.png')
+                                            : snapshot.data[0].image,
+                                        fit: BoxFit.cover,
+                                      ),
+                                      borderRadius:
+                                          BorderRadius.circular(10.0)),
+                                ),
+                                new Container(
+                                    height: (snapshot.data != null &&
+                                            snapshot.data[1] == true)
+                                        ? 25
+                                        : 0,
+                                    width: (snapshot.data != null &&
+                                            snapshot.data[1] == true)
+                                        ? 25
+                                        : 0,
+                                    margin:
+                                        EdgeInsets.only(bottom: 5, right: 5),
+                                    decoration: BoxDecoration(
+                                      image: DecorationImage(
+                                        image: new AssetImage(
+                                            'assets/cryptpad-logo-white-50.png'),
+                                        fit: BoxFit.cover,
+                                      ),
+                                    ),
+                                    alignment: Alignment.bottomRight)
+                              ])));
                 },
               ),
               staggeredTileBuilder: (index) =>
@@ -1035,16 +1183,26 @@ class MyHomePageState extends State<MyHomePage> {
             itemBuilder: (context, index) => FutureBuilder(
               future: _loadDriveImageData(index),
               builder: (BuildContext context, AsyncSnapshot snapshot) {
-                return new Tooltip(message: (snapshot.data == null) ? "Image" : snapshot.data[1], child: new Container(
-                  decoration: BoxDecoration(
-                      image: DecorationImage(
-                        image: (snapshot.data == null)
-                            ? new AssetImage('assets/cryptpad-logo-50.png')
-                            : snapshot.data[0],
-                        fit: BoxFit.cover,
-                      ),
-                      borderRadius: BorderRadius.circular(10.0)),
-                ));
+                return new Tooltip(
+                    message:
+                        (snapshot.data == null) ? "Image" : snapshot.data[1],
+                    child: new GestureDetector(
+                        onTap: () {
+                          print("Container clicked");
+                          selectedImageindex = index;
+                          Navigator.of(context).pushNamed('/photo');
+                        },
+                        child: new Container(
+                          decoration: BoxDecoration(
+                              image: DecorationImage(
+                                image: (snapshot.data == null)
+                                    ? new AssetImage(
+                                        'assets/cryptpad-logo-50.png')
+                                    : snapshot.data[0],
+                                fit: BoxFit.cover,
+                              ),
+                              borderRadius: BorderRadius.circular(10.0)),
+                        )));
               },
             ),
             staggeredTileBuilder: (index) =>
