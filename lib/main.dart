@@ -258,6 +258,8 @@ class MyHomePageState extends State<MyHomePage> {
     } catch (e) {
       logger.d("Cannot read max days");
     }
+    if (mDays==null)
+      mDays = "1";
 
     setMaxDays(int.parse(mDays));
     startPage = prefs.getString("startpage");
