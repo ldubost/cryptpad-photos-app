@@ -40,7 +40,6 @@ final Set<JavascriptChannel> jsChannels1 = [
 
 class PhotosApp extends StatelessWidget {
   // WebView to manage the relationship with CryptPad.
-  final flutterWebViewPlugin = FlutterWebviewPlugin();
   MyHomePage homePage = MyHomePage(title: 'CryptPad Photos');
 
   @override
@@ -55,9 +54,6 @@ class PhotosApp extends StatelessWidget {
       home: homePage,
       routes: {
         '/preferences': (context) => PreferencesPage(title: 'Settings'),
-        '/cryptpad': (_) {
-          return _cryptpadLoginWidget();
-        },
         '/photo': (_) {
           return homePage.homePageState.photoViewWidget();
         }
@@ -65,6 +61,7 @@ class PhotosApp extends StatelessWidget {
     );
   }
 
+/*
   WebviewScaffold _cryptpadLoginWidget() {
     return WebviewScaffold(
       url: homePage.getCryptPadInstanceURL(),
@@ -88,19 +85,19 @@ class PhotosApp extends StatelessWidget {
             IconButton(
               icon: const Icon(Icons.arrow_back_ios),
               onPressed: () {
-                flutterWebViewPlugin.goBack();
+                homePage.homePageState.flutterWebViewPlugin.goBack();
               },
             ),
             IconButton(
               icon: const Icon(Icons.arrow_forward_ios),
               onPressed: () {
-                flutterWebViewPlugin.goForward();
+                homePage.homePageState.flutterWebViewPlugin.goForward();
               },
             ),
             IconButton(
               icon: const Icon(Icons.autorenew),
               onPressed: () {
-                flutterWebViewPlugin.reload();
+                homePage.homePageState.flutterWebViewPlugin.reload();
               },
             ),
           ],
@@ -108,13 +105,14 @@ class PhotosApp extends StatelessWidget {
       ),
     );
   }
+*/
 }
 
 class MyHomePage extends StatefulWidget {
   MyHomePageState homePageState;
 
   MyHomePage({Key key, this.title}) : super(key: key) {
-    homePageState =  MyHomePageState();
+    homePageState = MyHomePageState();
   }
 
   final String title;
@@ -143,6 +141,8 @@ class MyHomePageState extends State<MyHomePage> {
   int currentIndex = 0;
 
   bool flutterWebViewPluginLoaded = false;
+  bool webViewVisible = false;
+
   FlutterWebviewPlugin flutterWebViewPlugin;
   final List<StaggeredTile> _staggeredTiles = const <StaggeredTile>[
     const StaggeredTile.count(2, 2),
@@ -409,6 +409,7 @@ class MyHomePageState extends State<MyHomePage> {
     flutterWebViewPluginLoaded = false;
     if (flutterWebViewPlugin == null) return;
     try {
+      webViewVisible = false;
       await flutterWebViewPlugin.close().timeout(new Duration(seconds: 5));
     } catch (e) {}
     flutterWebViewPlugin.dispose();
@@ -452,14 +453,15 @@ class MyHomePageState extends State<MyHomePage> {
   Future<Null> _loadWebView() async {
     var url = getCryptPadInstanceURL() + "drive/";
     logger.d("WebView launch: " + url);
+    var size = MediaQuery.of(context).size;
     var future = flutterWebViewPlugin.launch(url,
         javascriptChannels: jsChannels,
         hidden: true,
         rect: new Rect.fromLTWH(
           0.0,
-          0.0,
-          200.0,
-          500.0,
+          85,
+          size.width,
+          size.height - 85,
         ));
     future.then((value) {
       logger.d("Webview launch done");
@@ -767,8 +769,7 @@ class MyHomePageState extends State<MyHomePage> {
       logger.d("Decoding base64 image for " + href + " " + name);
       var str = thumbnail.substring(thumbnail.indexOf(",") + 1);
       logger.d(str);
-      var bytes =
-          base64.decode(str);
+      var bytes = base64.decode(str);
       var image = new Image.memory(bytes);
       file["image"] = image.image;
       return [image.image, name];
@@ -819,17 +820,15 @@ class MyHomePageState extends State<MyHomePage> {
   }
 
   Widget photoViewWidget() {
-    if (currentView=="local")
+    if (currentView == "local")
       return FutureBuilder(
           future: _loadImageData(selectedImageindex),
           builder: (BuildContext context, AsyncSnapshot snapshot) {
             return Container(
                 child: PhotoView(
-                  imageProvider: (snapshot.data == null)
-                      ? new AssetImage(
-                      'assets/cryptpad-logo-512.png')
-                      : snapshot.data[0].image
-                ));
+                    imageProvider: (snapshot.data == null)
+                        ? new AssetImage('assets/cryptpad-logo-512.png')
+                        : snapshot.data[0].image));
           });
     else
       return FutureBuilder(
@@ -838,10 +837,8 @@ class MyHomePageState extends State<MyHomePage> {
             return Container(
                 child: PhotoView(
                     imageProvider: (snapshot.data == null)
-                        ? new AssetImage(
-                        'assets/cryptpad-logo-512.png')
-                        : snapshot.data.image
-                ));
+                        ? new AssetImage('assets/cryptpad-logo-512.png')
+                        : snapshot.data.image));
           });
   }
 
@@ -854,7 +851,10 @@ class MyHomePageState extends State<MyHomePage> {
     selectedImageFail = false;
     var href = remoteImagesList[index];
     var file = remoteImagesListMap[href];
-    logger.d("_loadDriveImageFullData Getting image: " + href + " " + file["channel"]);
+    logger.d("_loadDriveImageFullData Getting image: " +
+        href +
+        " " +
+        file["channel"]);
     var script = """
     Console.postMessage("In script");     
     require(['/file/file-crypto.js'], function (FileCrypto) {
@@ -894,8 +894,12 @@ class MyHomePageState extends State<MyHomePage> {
        };
        Console.postMessage("In readfile prepare data");     
        var fData = {
-        "channel": '""" + file["channel"] + """',
-        "href": '""" + href + """',
+        "channel": '""" +
+        file["channel"] +
+        """',
+        "href": '""" +
+        href +
+        """',
        }
        readFile(fData, function(data) {
         Console.postMessage("In readfile feedback");     
@@ -910,14 +914,13 @@ class MyHomePageState extends State<MyHomePage> {
 
     logger.d("Waiting for image load");
     for (var i = 0; i < 10; i++) {
-      if (selectedImage!=null) {
+      if (selectedImage != null) {
         logger.d("Image has been loaded");
         return selectedImage;
       }
       if (selectedImageFail) {
         logger.d("Image failed to load");
         return null;
-
       }
       await Future.delayed(new Duration(seconds: 3));
       logger.d("Waiting more");
@@ -1216,7 +1219,20 @@ class MyHomePageState extends State<MyHomePage> {
         appBar: AppBar(
             centerTitle: true,
             elevation: 0,
-            leading: Image(image: AssetImage('assets/cryptpad-logo-50.png')),
+            leading: new Tooltip(
+                message: "CryptPad View",
+                child: new GestureDetector(
+                    onTap: () {
+                      if (!webViewVisible) {
+                        flutterWebViewPlugin.show();
+                        webViewVisible = true;
+                      } else {
+                        flutterWebViewPlugin.hide();
+                        webViewVisible = false;
+                      }
+                    },
+                    child: Image(
+                        image: AssetImage('assets/cryptpad-logo-50.png')))),
             title: Text(""),
             backgroundColor: Colors.transparent,
             iconTheme: IconThemeData(color: Colors.black),
@@ -1230,15 +1246,23 @@ class MyHomePageState extends State<MyHomePage> {
                       Navigator.of(context).pushNamed('/preferences');
                     },
                   )),
+              /*
               new Tooltip(
                   message: "Login / CryptPad View",
                   child: FlatButton(
                     textColor: Colors.blue,
                     child: Icon(Icons.web),
                     onPressed: () {
-                      Navigator.of(context).pushNamed('/cryptpad');
+                      if (!webViewVisible) {
+                        flutterWebViewPlugin.show();
+                        webViewVisible = true;
+                      } else {
+                        flutterWebViewPlugin.hide();
+                        webViewVisible = false;
+                      }
                     },
                   )),
+               */
               new Tooltip(
                   message: "Force reconnect",
                   child: FlatButton(
